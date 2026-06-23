@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "urirun-connector-ocr"
+version = "0.1.0"
+description = "OCR and document text connector for ifuri and urirun"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "if-uri" }]
+dependencies = ["urirun>=0.4.14"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "Pillow>=10"]
+
+[project.scripts]
+urirun-ocr = "urirun_connector_ocr.core:main"
+
+[project.entry-points."urirun.bindings"]
+ocr = "urirun_connector_ocr.core:urirun_bindings"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["urirun_connector_ocr*"]
+
+[tool.setuptools.package-data]
+urirun_connector_ocr = ["connector.manifest.json"]

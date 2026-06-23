@@ -1,0 +1,34 @@
+{
+  "name": "OCR",
+  "summary": "OCR and document text extraction routes for PDFs, images, screenshots, UI captures and URI-fetched blobs.",
+  "description": "Provides ocr:// routes backed by local system tools and optional source checkouts: semcod/imgl for screenshot OCR and UI boxes, wronai/img2nl for image analysis, wronai/ocr for heavier PDF OCR, and oqlos/vql as the downstream layout schema. The connector can OCR a local path, a base64 payload, or a blob fetched from another node through a URI such as fs://host/file/query/blob.",
+  "version": "0.1.0",
+  "publisher": {
+    "name": "if-uri"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "ocr",
+    "pdf",
+    "documents",
+    "base64",
+    "remote-node",
+    "host-compute",
+    "screenshots",
+    "imgl",
+    "img2nl",
+    "vql",
+    "wronai",
+    "semcod",
+    "oqlos"
+  ],
+  "install": {
+    "pip": "urirun-connector-ocr",
+    "local": "pip install -e /home/tom/github/if-uri/urirun-connector-ocr"
+  },
+  "env": {
+    "URI_OCR_SOURCE_PATHS": "Optional path list for local source checkouts. Defaults include /home/tom/github/semcod/imgl, /home/tom/github/wronai/img2nl/src, /home/tom/github/wronai/ocr, /home/tom/github/oqlos/vql/src.",
+    "URI_OCR_LATEST_IMAGE": "Default image path used by ocr://host/image/latest/query/text.",
+    "URI_OCR_ENABLE_AI": "Set to 1 to allow auto mode to call the heavier wronai/ocr Ollama backend."
+  }
+}
