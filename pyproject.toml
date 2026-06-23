@@ -13,6 +13,7 @@ authors = [{ name = "if-uri" }]
 dependencies = ["urirun>=0.4.14"]
 
 [project.optional-dependencies]
+smartcrop = ["urirun-connector-smart-crop"]
 test = ["pytest>=8", "Pillow>=10"]
 
 [project.scripts]

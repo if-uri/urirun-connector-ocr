@@ -11,6 +11,8 @@ backends when they are available on the node:
 - `wronai/img2nl` for image analysis and optional RapidOCR text
 - `wronai/ocr` for heavier PDF OCR through PyMuPDF/Ollama
 - `oqlos/vql` as the layout schema target used by the imgl pipeline
+- `urirun-connector-smart-crop` when `smart_crop=true`, so image OCR runs on a
+  detected receipt/document crop instead of the full camera frame
 
 ## Routes
 
@@ -29,6 +31,14 @@ urirun-ocr text --path ~/Downloads/invoice.pdf --max_chars 20000
 urirun-ocr text --filename invoice.txt --bytes_b64 SW52b2ljZQo=
 urirun-ocr batch --root ~/Downloads/2026/5 --extensions pdf,png,jpg --output_json /tmp/ocr.json
 urirun-ocr text --path /tmp/screen.png --backend imgl --lang eng+pol
+```
+
+Pre-crop a receipt/document before OCR:
+
+```bash
+urirun run 'ocr://host/image/query/text' ocr.registry.json \
+  --payload '{"image":"/tmp/phone-frame.jpg","smart_crop":true,"backend":"tesseract"}' \
+  --execute --allow 'ocr://**'
 ```
 
 Node usage:

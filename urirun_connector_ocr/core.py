@@ -121,6 +121,18 @@ def _payload(result: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in result.items() if k not in {"ok", "error", "connector"}}
 
 
+def _smart_crop_target(path: Path, output_dir: str = "") -> tuple[Path, dict[str, Any]]:
+    try:
+        from urirun_connector_smart_crop import detect_document_crop
+    except Exception as exc:  # noqa: BLE001
+        return path, {"ok": False, "reason": f"smart-crop connector unavailable: {exc}", "originalPath": str(path)}
+
+    crop = detect_document_crop(path, output_dir=output_dir or None)
+    if crop.get("ok") and crop.get("path"):
+        return Path(str(crop["path"])).expanduser().resolve(), crop
+    return path, crop
+
+
 def _decode_bytes_b64(bytes_b64: str, max_input_bytes: int) -> bytes:
     try:
         raw = base64.b64decode(bytes_b64.encode("ascii"), validate=True)
@@ -356,6 +368,27 @@ def _img2nl_image_text(path: Path, max_chars: int, source_paths: str) -> dict[st
     }
 
 
+def _failed_attempts_result(kind: str, attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return one actionable failure while preserving every backend attempt."""
+    if not attempts:
+        return {"ok": False, "backend": "auto", "error": f"no {kind} OCR attempts", "attempts": []}
+    compact = [
+        {"backend": item.get("backend"), "ok": item.get("ok"), "error": item.get("error")}
+        for item in attempts
+    ]
+    errors = [
+        f"{item.get('backend') or 'backend'}: {item.get('error') or 'failed'}"
+        for item in compact
+        if not item.get("ok")
+    ]
+    return {
+        "ok": False,
+        "backend": "auto",
+        "error": "; ".join(errors) or f"{kind} OCR failed",
+        "attempts": compact,
+    }
+
+
 def _wronai_pdf_ocr(
     path: Path,
     max_chars: int,
@@ -426,12 +459,7 @@ def _image_auto(
         if result.get("ok") and str(result.get("text") or "").strip():
             result["attempts"] = [{"backend": item.get("backend"), "ok": item.get("ok")} for item in attempts]
             return result
-    fallback = attempts[0] if attempts else {"ok": False, "error": "no image OCR attempts"}
-    fallback["attempts"] = [
-        {"backend": item.get("backend"), "ok": item.get("ok"), "error": item.get("error")}
-        for item in attempts
-    ]
-    return fallback
+    return _failed_attempts_result("image", attempts)
 
 
 def _document_auto(
@@ -459,12 +487,7 @@ def _document_auto(
             result["attempts"] = [{"backend": item.get("backend"), "ok": item.get("ok")} for item in attempts]
             return result
 
-    fallback = attempts[0] if attempts else {"ok": False, "error": "no document OCR attempts"}
-    fallback["attempts"] = [
-        {"backend": item.get("backend"), "ok": item.get("ok"), "error": item.get("error")}
-        for item in attempts
-    ]
-    return fallback
+    return _failed_attempts_result("document", attempts)
 
 
 def _iter_document_files(
@@ -537,6 +560,9 @@ def document_text(
     max_chars: int = 20000,
     max_input_bytes: int = 10 * 1024 * 1024,
     output_dir: str = "",
+    smart_crop: bool = False,
+    crop_output_dir: str = "",
+    crop_fail_if_uncertain: bool = False,
     source_paths: str = "",
     timeout: int = 90,
 ) -> dict[str, Any]:
@@ -559,31 +585,46 @@ def document_text(
             return urirun.fail(f"file not found: {target}", connector=CONNECTOR_ID, path=str(target))
         original = {"filename": filename or target.name, "bytes": target.stat().st_size}
 
+    smart_crop_meta: dict[str, Any] | None = None
+    ocr_target = target
+    if smart_crop and target.suffix.lower() in IMAGE_EXTS:
+        ocr_target, smart_crop_meta = _smart_crop_target(target, crop_output_dir or output_dir)
+        if crop_fail_if_uncertain and not smart_crop_meta.get("ok"):
+            if temp_dir is not None:
+                temp_dir.cleanup()
+            return urirun.fail(
+                str(smart_crop_meta.get("reason", "smart crop failed")),
+                connector=CONNECTOR_ID,
+                input=original,
+                smartCrop=smart_crop_meta,
+            )
+
     try:
         selected = backend.strip().lower() or "auto"
         if selected == "auto":
-            result = _document_auto(target, lang, max_chars, source_paths, output_dir, timeout)
+            result = _document_auto(ocr_target, lang, max_chars, source_paths, output_dir, timeout)
         elif selected == "pdftotext":
-            result = _pdftotext(target, max_chars, timeout)
+            result = _pdftotext(ocr_target, max_chars, timeout)
         elif selected == "pymupdf":
-            result = _pymupdf_text(target, max_chars)
+            result = _pymupdf_text(ocr_target, max_chars)
         elif selected == "tesseract":
-            result = _tesseract_image(target, lang, max_chars, timeout)
+            result = _tesseract_image(ocr_target, lang, max_chars, timeout)
         elif selected == "imgl":
-            result = _imgl_image_text(target, lang, max_chars, max_boxes=250, source_paths=source_paths)
+            result = _imgl_image_text(ocr_target, lang, max_chars, max_boxes=250, source_paths=source_paths)
         elif selected == "img2nl":
-            result = _img2nl_image_text(target, max_chars, source_paths)
+            result = _img2nl_image_text(ocr_target, max_chars, source_paths)
         elif selected in {"wronai", "wronai-ocr", "pdf-ocr"}:
-            result = _wronai_pdf_ocr(target, max_chars, output_dir, source_paths, lang, timeout)
+            result = _wronai_pdf_ocr(ocr_target, max_chars, output_dir, source_paths, lang, timeout)
         else:
             return urirun.fail(f"unsupported OCR backend: {backend}", connector=CONNECTOR_ID, path=str(target))
     finally:
         if temp_dir is not None:
             temp_dir.cleanup()
 
+    extra = {"smartCrop": smart_crop_meta, "originalPath": str(target), "ocrPath": str(ocr_target)} if smart_crop_meta is not None else {}
     if result.get("ok"):
-        return urirun.ok(connector=CONNECTOR_ID, input=original, **_payload(result))
-    return urirun.fail(str(result.get("error", "OCR failed")), connector=CONNECTOR_ID, input=original, **_payload(result))
+        return urirun.ok(connector=CONNECTOR_ID, input=original, **extra, **_payload(result))
+    return urirun.fail(str(result.get("error", "OCR failed")), connector=CONNECTOR_ID, input=original, **extra, **_payload(result))
 
 
 @conn.handler("document/query/text_from_uri", isolated=True, meta={"label": "Extract text from a document fetched by URI", "cliAlias": "text-from-uri"})
@@ -595,6 +636,9 @@ def document_text_from_uri(
     lang: str = "eng+pol",
     max_chars: int = 20000,
     max_input_bytes: int = 10 * 1024 * 1024,
+    smart_crop: bool = False,
+    crop_output_dir: str = "",
+    crop_fail_if_uncertain: bool = False,
     source_paths: str = "",
     timeout: int = 120,
 ) -> dict[str, Any]:
@@ -630,6 +674,9 @@ def document_text_from_uri(
         lang=lang,
         max_chars=max_chars,
         max_input_bytes=max_input_bytes,
+        smart_crop=smart_crop,
+        crop_output_dir=crop_output_dir,
+        crop_fail_if_uncertain=crop_fail_if_uncertain,
         source_paths=source_paths,
         timeout=timeout,
     )
@@ -653,6 +700,9 @@ def image_text(
     lang: str = "eng+pol",
     max_chars: int = 12000,
     max_boxes: int = 250,
+    smart_crop: bool = False,
+    crop_output_dir: str = "",
+    crop_fail_if_uncertain: bool = False,
     source_paths: str = "",
     timeout: int = 60,
 ) -> dict[str, Any]:
@@ -663,24 +713,38 @@ def image_text(
     if not target.is_file():
         return urirun.fail(f"image not found: {target}", connector=CONNECTOR_ID, image=str(target))
 
+    smart_crop_meta: dict[str, Any] | None = None
+    ocr_target = target
+    if smart_crop:
+        ocr_target, smart_crop_meta = _smart_crop_target(target, crop_output_dir)
+        if crop_fail_if_uncertain and not smart_crop_meta.get("ok"):
+            return urirun.fail(
+                str(smart_crop_meta.get("reason", "smart crop failed")),
+                connector=CONNECTOR_ID,
+                image=str(target),
+                smartCrop=smart_crop_meta,
+            )
+
     selected = backend.strip().lower() or "auto"
     if selected == "auto":
-        result = _image_auto(target, lang, max_chars, max_boxes, source_paths, timeout)
+        result = _image_auto(ocr_target, lang, max_chars, max_boxes, source_paths, timeout)
     elif selected == "imgl":
-        result = _imgl_image_text(target, lang, max_chars, max_boxes, source_paths)
+        result = _imgl_image_text(ocr_target, lang, max_chars, max_boxes, source_paths)
     elif selected == "tesseract":
-        result = _tesseract_image(target, lang, max_chars, timeout)
+        result = _tesseract_image(ocr_target, lang, max_chars, timeout)
     elif selected == "img2nl":
-        result = _img2nl_image_text(target, max_chars, source_paths)
+        result = _img2nl_image_text(ocr_target, max_chars, source_paths)
     else:
         return urirun.fail(f"unsupported image OCR backend: {backend}", connector=CONNECTOR_ID, image=str(target))
 
+    extra = {"smartCrop": smart_crop_meta, "originalPath": str(target), "ocrPath": str(ocr_target)} if smart_crop_meta is not None else {}
     if result.get("ok"):
-        return urirun.ok(connector=CONNECTOR_ID, image=str(target), **_payload(result))
+        return urirun.ok(connector=CONNECTOR_ID, image=str(target), **extra, **_payload(result))
     return urirun.fail(
         str(result.get("error", "image OCR failed")),
         connector=CONNECTOR_ID,
         image=str(target),
+        **extra,
         **_payload(result),
     )
 
@@ -692,6 +756,9 @@ def image_latest_text(
     lang: str = "eng+pol",
     max_chars: int = 12000,
     max_boxes: int = 250,
+    smart_crop: bool = False,
+    crop_output_dir: str = "",
+    crop_fail_if_uncertain: bool = False,
     source_paths: str = "",
     timeout: int = 60,
 ) -> dict[str, Any]:
@@ -705,6 +772,9 @@ def image_latest_text(
         lang=lang,
         max_chars=max_chars,
         max_boxes=max_boxes,
+        smart_crop=smart_crop,
+        crop_output_dir=crop_output_dir,
+        crop_fail_if_uncertain=crop_fail_if_uncertain,
         source_paths=source_paths,
         timeout=timeout,
     )
@@ -722,6 +792,8 @@ def document_batch(
     max_chars_per_file: int = 2000,
     output_json: str = "",
     output_csv: str = "",
+    smart_crop: bool = False,
+    crop_output_dir: str = "",
     source_paths: str = "",
     timeout: int = 90,
 ) -> dict[str, Any]:
@@ -748,6 +820,8 @@ def document_batch(
             lang=lang,
             max_chars=max_chars_per_file,
             output_dir="",
+            smart_crop=smart_crop,
+            crop_output_dir=crop_output_dir,
             source_paths=source_paths,
             timeout=timeout,
         )

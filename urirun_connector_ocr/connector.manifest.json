@@ -1,7 +1,7 @@
 {
   "name": "OCR",
   "summary": "OCR and document text extraction routes for PDFs, images, screenshots, UI captures and URI-fetched blobs.",
-  "description": "Provides ocr:// routes backed by local system tools and optional source checkouts: semcod/imgl for screenshot OCR and UI boxes, wronai/img2nl for image analysis, wronai/ocr for heavier PDF OCR, and oqlos/vql as the downstream layout schema. The connector can OCR a local path, a base64 payload, or a blob fetched from another node through a URI such as fs://host/file/query/blob.",
+  "description": "Provides ocr:// routes backed by local system tools and optional source checkouts: semcod/imgl for screenshot OCR and UI boxes, wronai/img2nl for image analysis, wronai/ocr for heavier PDF OCR, and oqlos/vql as the downstream layout schema. The connector can OCR a local path, a base64 payload, or a blob fetched from another node through a URI such as fs://host/file/query/blob. For image OCR, smart_crop=true reuses urirun-connector-smart-crop to detect and crop the receipt/document before OCR.",
   "version": "0.1.0",
   "publisher": {
     "name": "if-uri"
@@ -20,7 +20,8 @@
     "vql",
     "wronai",
     "semcod",
-    "oqlos"
+    "oqlos",
+    "smart-crop"
   ],
   "install": {
     "pip": "urirun-connector-ocr",
@@ -30,5 +31,24 @@
     "URI_OCR_SOURCE_PATHS": "Optional path list for local source checkouts. Defaults include /home/tom/github/semcod/imgl, /home/tom/github/wronai/img2nl/src, /home/tom/github/wronai/ocr, /home/tom/github/oqlos/vql/src.",
     "URI_OCR_LATEST_IMAGE": "Default image path used by ocr://host/image/latest/query/text.",
     "URI_OCR_ENABLE_AI": "Set to 1 to allow auto mode to call the heavier wronai/ocr Ollama backend."
-  }
+  },
+  "payloadOptions": {
+    "smart_crop": "When true on image/document OCR routes, image files are preprocessed by urirun-connector-smart-crop before OCR.",
+    "crop_output_dir": "Optional directory for generated smart-crop files.",
+    "crop_fail_if_uncertain": "When true, fail OCR if smart-crop cannot confidently find a document."
+  },
+  "routes": [
+    "ocr://host/backend/query/probe",
+    "ocr://host/document/query/batch",
+    "ocr://host/document/query/text",
+    "ocr://host/document/query/text_from_uri",
+    "ocr://host/image/latest/query/text",
+    "ocr://host/image/query/text"
+  ],
+  "uriSchemes": [
+    "ocr"
+  ],
+  "adapterKinds": [
+    "local-function"
+  ]
 }

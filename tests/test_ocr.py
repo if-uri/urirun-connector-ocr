@@ -164,6 +164,50 @@ def test_image_text_uses_imgl_backend(monkeypatch, tmp_path: Path) -> None:
     assert result["boxes"][0]["text"] == "LinkedIn"
 
 
+def test_image_text_smart_crop_runs_ocr_on_cropped_path(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "frame.jpg"
+    path.write_bytes(b"frame")
+    crop = tmp_path / "frame-document-crop.jpg"
+    crop.write_bytes(b"crop")
+    seen: list[Path] = []
+
+    monkeypatch.setattr(
+        core,
+        "_smart_crop_target",
+        lambda target, output_dir="": (crop, {"ok": True, "path": str(crop), "box": [1, 2, 3, 4]}),
+    )
+
+    def fake_tesseract(target, *args, **kwargs):
+        seen.append(target)
+        return {"ok": True, "backend": "tesseract", "path": str(target), "text": "PARAGON", "chars": 7}
+
+    monkeypatch.setattr(core, "_tesseract_image", fake_tesseract)
+
+    result = image_text(image=str(path), backend="tesseract", smart_crop=True)
+
+    assert result["ok"] is True
+    assert seen == [crop]
+    assert result["ocrPath"] == str(crop)
+    assert result["originalPath"] == str(path.resolve())
+    assert result["smartCrop"]["ok"] is True
+
+
+def test_image_auto_reports_all_failed_backends(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "screen.png"
+    path.write_bytes(b"not really a png")
+    monkeypatch.setattr(core, "_imgl_image_text", lambda *a, **k: {"ok": False, "backend": "imgl", "error": "missing imgl"})
+    monkeypatch.setattr(core, "_tesseract_image", lambda *a, **k: {"ok": False, "backend": "tesseract", "error": "missing tesseract"})
+    monkeypatch.setattr(core, "_img2nl_image_text", lambda *a, **k: {"ok": False, "backend": "img2nl", "error": "missing img2nl"})
+
+    result = image_text(image=str(path), backend="auto")
+
+    assert result["ok"] is False
+    assert result["backend"] == "auto"
+    assert "missing imgl" in result["error"]
+    assert "missing tesseract" in result["error"]
+    assert [item["backend"] for item in result["attempts"]] == ["imgl", "tesseract", "img2nl"]
+
+
 def test_image_latest_uses_env(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "latest.png"
     path.write_bytes(b"x")
