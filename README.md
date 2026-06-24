@@ -5,6 +5,10 @@ OCR routes for urirun nodes.
 The connector uses lightweight local tools first and optional repository
 backends when they are available on the node:
 
+- **PaddleOCR** (`paddle`) for full-frame image OCR — PP-OCRv5/v6 detection +
+  recognition with document orientation + UVDoc dewarping. **Preferred backend in
+  `auto` mode**: it reads Polish receipts/invoices on the whole frame far more
+  reliably than tesseract and never loses the header/footer to an aggressive crop
 - `pdftotext` for text PDFs
 - `tesseract` CLI for image OCR
 - `semcod/imgl` for screenshot/UI OCR with bounding boxes
@@ -13,6 +17,23 @@ backends when they are available on the node:
 - `oqlos/vql` as the layout schema target used by the imgl pipeline
 - `urirun-connector-smart-crop` when `smart_crop=true`, so image OCR runs on a
   detected receipt/document crop instead of the full camera frame
+
+### PaddleOCR backend (`backend="paddle"`)
+
+`image`/`document` text routes accept `backend="paddle"` (also the first backend
+tried in `backend="auto"`). It runs in-process and is tuned by env:
+
+| env | default | meaning |
+| --- | --- | --- |
+| `URI_OCR_DISABLE_PADDLE` | `0` | set `1` to skip paddle entirely |
+| `URI_OCR_PADDLE_UNWARP` | `1` | UVDoc dewarping (slowest stage; off ≈ ~25% faster) |
+| `URI_OCR_PADDLE_ORIENT` | `1` | document-orientation classification |
+| `URI_OCR_PADDLE_LANG` | _(unset)_ | force a recognizer language; default reads Latin/Polish |
+| `URI_OCR_PADDLE_DET_MODEL` / `URI_OCR_PADDLE_REC_MODEL` | _(unset)_ | override detection/recognition model (e.g. `*_mobile_*` for speed) |
+
+> Requires `paddleocr` + `paddle` in the environment. `enable_mkldnn=False` is forced
+> (the oneDNN/PIR path crashes on this paddle build). ~25–33s/frame on CPU; the
+> recognition over many lines dominates, so mobile models help only marginally.
 
 ## Routes
 
@@ -62,3 +83,8 @@ urirun run 'ocr://host/document/query/batch' ocr.registry.json \
 
 Set `URI_OCR_SOURCE_PATHS` when the optional repos are not in their default
 locations.
+
+`text_from_uri` authenticates the cross-node `/run` call with `URIRUN_RUN_TOKEN`,
+addressed **by reference**: the value may be the literal token or a secrets-layer
+reference (`secret://keyring/urirun#run-token`, `getv://URIRUN_RUN_TOKEN`), resolved
+deny-by-default (widen the allow-list with `URIRUN_RUN_TOKEN_ALLOW`).
