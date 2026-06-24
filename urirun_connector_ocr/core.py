@@ -295,6 +295,118 @@ def _tesseract_image(path: Path, lang: str, max_chars: int, timeout: int) -> dic
     }
 
 
+_PADDLE_OCR_CACHE: dict[tuple[bool, bool, str, str, str], Any] = {}
+
+
+def _paddle_truthy(env_name: str, default: str = "1") -> bool:
+    return str(os.getenv(env_name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _paddle_instance(*, orientation: bool, unwarp: bool, lang: str) -> Any:
+    """Build (once) and cache a PaddleOCR pipeline.
+
+    The instance is expensive to construct (model load ~20s), so it is memoised per
+    (orientation, unwarp, lang, det_model, rec_model) combination. ``enable_mkldnn=False``
+    is mandatory: the default oneDNN/PIR executor crashes on these models in this venv with
+    ``ConvertPirAttribute2RuntimeAttribute`` (paddle 3.3.x). See the smart-crop note.
+
+    ``URI_OCR_PADDLE_DET_MODEL`` / ``URI_OCR_PADDLE_REC_MODEL`` override the detection and
+    recognition models — set them to ``*_mobile_*`` variants (e.g. ``PP-OCRv5_mobile_det``)
+    for a faster, lower-accuracy read on slow CPUs.
+    """
+    det_model = str(os.getenv("URI_OCR_PADDLE_DET_MODEL", "")).strip()
+    rec_model = str(os.getenv("URI_OCR_PADDLE_REC_MODEL", "")).strip()
+    key = (orientation, unwarp, lang, det_model, rec_model)
+    cached = _PADDLE_OCR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    # Avoid the model-source connectivity probe (it blocks and prints to stdout).
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    from paddleocr import PaddleOCR  # type: ignore
+
+    kwargs: dict[str, Any] = {
+        "use_doc_orientation_classify": orientation,
+        "use_doc_unwarping": unwarp,
+        "enable_mkldnn": False,
+    }
+    if lang:
+        kwargs["lang"] = lang
+    if det_model:
+        kwargs["text_detection_model_name"] = det_model
+    if rec_model:
+        kwargs["text_recognition_model_name"] = rec_model
+    instance = PaddleOCR(**kwargs)
+    _PADDLE_OCR_CACHE[key] = instance
+    return instance
+
+
+def _paddle_image(path: Path, lang: str, max_chars: int, max_boxes: int = 250) -> dict[str, Any]:
+    """OCR a full-frame image with PaddleOCR (PP-OCRv5/v6 det+rec + doc preprocessing).
+
+    Runs on the *whole* frame so document text is never lost to an aggressive crop,
+    and applies document orientation + (optional) UVDoc dewarping first. Controlled by
+    ``URI_OCR_DISABLE_PADDLE`` (skip), ``URI_OCR_PADDLE_UNWARP`` (dewarp, default on),
+    ``URI_OCR_PADDLE_ORIENT`` (orientation, default on) and ``URI_OCR_PADDLE_LANG``.
+    """
+    import contextlib
+
+    if _paddle_truthy("URI_OCR_DISABLE_PADDLE", "0"):
+        return {"ok": False, "backend": "paddle", "error": "paddle disabled via URI_OCR_DISABLE_PADDLE"}
+    # The shared lang string is tesseract-style ("eng+pol"); PaddleOCR's default
+    # multilingual recognizer already reads Latin/Polish, so only force a lang when
+    # the operator asks for one explicitly.
+    paddle_lang = str(os.getenv("URI_OCR_PADDLE_LANG", "")).strip()
+    orientation = _paddle_truthy("URI_OCR_PADDLE_ORIENT", "1")
+    unwarp = _paddle_truthy("URI_OCR_PADDLE_UNWARP", "1")
+    try:
+        ocr = _paddle_instance(orientation=orientation, unwarp=unwarp, lang=paddle_lang)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "backend": "paddle", "error": f"paddle unavailable: {exc}"}
+
+    try:
+        # PaddleOCR chatters to stdout; keep the JSON return channel clean.
+        with contextlib.redirect_stdout(sys.stderr):
+            prediction = ocr.predict(str(path))
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "backend": "paddle", "error": f"paddle predict failed: {exc}"}
+
+    if not prediction:
+        return {"ok": False, "backend": "paddle", "error": "paddle returned no result"}
+    res = prediction[0]
+    texts = list(res.get("rec_texts") or [])
+    scores = list(res.get("rec_scores") or [])
+    polys = res.get("rec_polys")
+    boxes: list[dict[str, Any]] = []
+    for idx, line in enumerate(texts[:max_boxes]):
+        box: dict[str, Any] = {"text": line}
+        if idx < len(scores):
+            box["score"] = round(float(scores[idx]), 4)
+        if polys is not None and idx < len(polys):
+            try:
+                box["poly"] = [[int(p[0]), int(p[1])] for p in polys[idx]]
+            except (TypeError, ValueError, IndexError):
+                pass
+        boxes.append(box)
+    text, truncated = _clip("\n".join(texts), max_chars)
+    pre = res.get("doc_preprocessor_res") or {}
+    return {
+        "ok": bool(texts),
+        "backend": "paddle",
+        "path": str(path),
+        "text": text,
+        "chars": len(text),
+        "truncated": truncated,
+        "boxes": boxes,
+        "box_count": len(texts),
+        "docPreprocess": {
+            "orientation": orientation,
+            "unwarp": unwarp,
+            "angle": pre.get("angle"),
+        },
+        "error": None if texts else "paddle found no text",
+    }
+
+
 def _imgl_image_text(
     path: Path,
     lang: str,
@@ -450,12 +562,20 @@ def _image_auto(
     source_paths: str,
     timeout: int,
 ) -> dict[str, Any]:
-    attempts = [
-        _imgl_image_text(path, lang, max_chars, max_boxes, source_paths),
-        _tesseract_image(path, lang, max_chars, timeout),
-        _img2nl_image_text(path, max_chars, source_paths),
+    # Paddle first: it OCRs the full frame (no crop-loss) with doc orientation/dewarp
+    # and reads Polish receipts far more reliably. Evaluated lazily so the cheaper
+    # fallbacks only run when paddle is unavailable or finds nothing. It returns
+    # ok=False quickly when paddle is not installed or disabled.
+    providers = [
+        lambda: _paddle_image(path, lang, max_chars, max_boxes),
+        lambda: _imgl_image_text(path, lang, max_chars, max_boxes, source_paths),
+        lambda: _tesseract_image(path, lang, max_chars, timeout),
+        lambda: _img2nl_image_text(path, max_chars, source_paths),
     ]
-    for result in attempts:
+    attempts: list[dict[str, Any]] = []
+    for provider in providers:
+        result = provider()
+        attempts.append(result)
         if result.get("ok") and str(result.get("text") or "").strip():
             result["attempts"] = [{"backend": item.get("backend"), "ok": item.get("ok")} for item in attempts]
             return result
@@ -540,6 +660,7 @@ def ocr_probe(source_paths: str = "") -> dict[str, Any]:
         "vql": _module_probe("vql", source_paths),
         "fitz": _module_probe("fitz", source_paths),
         "rapidocr_onnxruntime": _module_probe("rapidocr_onnxruntime", source_paths),
+        "paddleocr": _module_probe("paddleocr", source_paths),
     }
     return urirun.ok(
         connector=CONNECTOR_ID,
@@ -609,6 +730,8 @@ def document_text(
             result = _pymupdf_text(ocr_target, max_chars)
         elif selected == "tesseract":
             result = _tesseract_image(ocr_target, lang, max_chars, timeout)
+        elif selected in {"paddle", "paddleocr"}:
+            result = _paddle_image(ocr_target, lang, max_chars)
         elif selected == "imgl":
             result = _imgl_image_text(ocr_target, lang, max_chars, max_boxes=250, source_paths=source_paths)
         elif selected == "img2nl":
@@ -623,7 +746,7 @@ def document_text(
 
     extra = {"smartCrop": smart_crop_meta, "originalPath": str(target), "ocrPath": str(ocr_target)} if smart_crop_meta is not None else {}
     if result.get("ok"):
-        return urirun.ok(connector=CONNECTOR_ID, input=original, **extra, **_payload(result))
+        return urirun.tag(urirun.ok(connector=CONNECTOR_ID, input=original, **extra, **_payload(result)), "text")
     return urirun.fail(str(result.get("error", "OCR failed")), connector=CONNECTOR_ID, input=original, **extra, **_payload(result))
 
 
@@ -728,6 +851,8 @@ def image_text(
     selected = backend.strip().lower() or "auto"
     if selected == "auto":
         result = _image_auto(ocr_target, lang, max_chars, max_boxes, source_paths, timeout)
+    elif selected in {"paddle", "paddleocr"}:
+        result = _paddle_image(ocr_target, lang, max_chars, max_boxes)
     elif selected == "imgl":
         result = _imgl_image_text(ocr_target, lang, max_chars, max_boxes, source_paths)
     elif selected == "tesseract":
@@ -739,7 +864,7 @@ def image_text(
 
     extra = {"smartCrop": smart_crop_meta, "originalPath": str(target), "ocrPath": str(ocr_target)} if smart_crop_meta is not None else {}
     if result.get("ok"):
-        return urirun.ok(connector=CONNECTOR_ID, image=str(target), **extra, **_payload(result))
+        return urirun.tag(urirun.ok(connector=CONNECTOR_ID, image=str(target), **extra, **_payload(result)), "text")
     return urirun.fail(
         str(result.get("error", "image OCR failed")),
         connector=CONNECTOR_ID,
@@ -856,7 +981,7 @@ def document_batch(
         reports["csv"] = _write_csv_report(output_csv, rows)
     if reports:
         report["reports"] = reports
-    return urirun.ok(**{k: v for k, v in report.items() if k != "ok"})
+    return urirun.tag(urirun.ok(**{k: v for k, v in report.items() if k != "ok"}), "text-batch")
 
 
 def urirun_bindings() -> dict[str, Any]:

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import urirun
@@ -45,6 +47,9 @@ def test_document_text_reads_plain_text(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["backend"] == "text-file"
     assert "Faktura" in result["text"]
+    # Shared urirun.tag contract: extracted text is a frozen artifact, not a live widget.
+    assert result["kind"] == "text"
+    assert result["live"] is False
 
 
 def test_document_text_reads_base64_payload() -> None:
@@ -195,6 +200,7 @@ def test_image_text_smart_crop_runs_ocr_on_cropped_path(monkeypatch, tmp_path: P
 def test_image_auto_reports_all_failed_backends(monkeypatch, tmp_path: Path) -> None:
     path = tmp_path / "screen.png"
     path.write_bytes(b"not really a png")
+    monkeypatch.setattr(core, "_paddle_image", lambda *a, **k: {"ok": False, "backend": "paddle", "error": "missing paddle"})
     monkeypatch.setattr(core, "_imgl_image_text", lambda *a, **k: {"ok": False, "backend": "imgl", "error": "missing imgl"})
     monkeypatch.setattr(core, "_tesseract_image", lambda *a, **k: {"ok": False, "backend": "tesseract", "error": "missing tesseract"})
     monkeypatch.setattr(core, "_img2nl_image_text", lambda *a, **k: {"ok": False, "backend": "img2nl", "error": "missing img2nl"})
@@ -205,7 +211,59 @@ def test_image_auto_reports_all_failed_backends(monkeypatch, tmp_path: Path) -> 
     assert result["backend"] == "auto"
     assert "missing imgl" in result["error"]
     assert "missing tesseract" in result["error"]
-    assert [item["backend"] for item in result["attempts"]] == ["imgl", "tesseract", "img2nl"]
+    assert [item["backend"] for item in result["attempts"]] == ["paddle", "imgl", "tesseract", "img2nl"]
+
+
+def test_image_auto_prefers_paddle(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "receipt.jpg"
+    path.write_bytes(b"frame")
+
+    def fail(*a, **k):  # any other backend would be a regression
+        raise AssertionError("fallback backend ran despite paddle success")
+
+    monkeypatch.setattr(
+        core,
+        "_paddle_image",
+        lambda *a, **k: {"ok": True, "backend": "paddle", "path": str(path), "text": "BOTERM\n200,62", "chars": 13},
+    )
+    monkeypatch.setattr(core, "_imgl_image_text", fail)
+    monkeypatch.setattr(core, "_tesseract_image", fail)
+    monkeypatch.setattr(core, "_img2nl_image_text", fail)
+
+    result = image_text(image=str(path), backend="auto")
+
+    assert result["ok"] is True
+    assert result["backend"] == "paddle"
+    assert "200,62" in result["text"]
+
+
+def test_paddle_instance_cache_includes_model_overrides(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, "paddleocr", types.SimpleNamespace(PaddleOCR=FakePaddleOCR))
+    core._PADDLE_OCR_CACHE.clear()
+    monkeypatch.setenv("URI_OCR_PADDLE_DET_MODEL", "PP-OCRv5_mobile_det")
+    monkeypatch.setenv("URI_OCR_PADDLE_REC_MODEL", "PP-OCRv5_mobile_rec")
+
+    first = core._paddle_instance(orientation=True, unwarp=False, lang="")
+    second = core._paddle_instance(orientation=True, unwarp=False, lang="")
+
+    assert first is second
+    assert len(calls) == 1
+    assert calls[0]["text_detection_model_name"] == "PP-OCRv5_mobile_det"
+    assert calls[0]["text_recognition_model_name"] == "PP-OCRv5_mobile_rec"
+
+    monkeypatch.setenv("URI_OCR_PADDLE_REC_MODEL", "PP-OCRv5_server_rec")
+    third = core._paddle_instance(orientation=True, unwarp=False, lang="")
+
+    assert third is not first
+    assert len(calls) == 2
+    assert calls[1]["text_recognition_model_name"] == "PP-OCRv5_server_rec"
+    core._PADDLE_OCR_CACHE.clear()
 
 
 def test_image_latest_uses_env(monkeypatch, tmp_path: Path) -> None:
