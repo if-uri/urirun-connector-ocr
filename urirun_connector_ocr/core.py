@@ -162,7 +162,11 @@ def _route_value(envelope: dict[str, Any]) -> dict[str, Any]:
 def _post_uri_run(node_url: str, uri: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
     body = json.dumps({"uri": uri, "payload": payload}).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    token = os.getenv("URIRUN_RUN_TOKEN", "")
+    # The node run token is addressed by reference: URIRUN_RUN_TOKEN may hold the literal token
+    # or a secret reference (e.g. secret://keyring/urirun#run-token), resolved deny-by-default
+    # through the secrets layer (allow = the value itself, widen with URIRUN_RUN_TOKEN_ALLOW).
+    raw_token = os.getenv("URIRUN_RUN_TOKEN", "")
+    token = urirun.resolve_secret(raw_token, os.getenv("URIRUN_RUN_TOKEN_ALLOW", raw_token))
     if token:
         headers["X-Urirun-Token"] = token
     request = urllib.request.Request(

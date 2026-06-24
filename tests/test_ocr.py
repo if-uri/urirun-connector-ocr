@@ -90,6 +90,27 @@ def test_document_text_pdftotext_backend(monkeypatch, tmp_path: Path) -> None:
     assert result["text"] == "Invoice 123"
 
 
+def test_post_uri_run_resolves_run_token_secret_reference(monkeypatch) -> None:
+    # URIRUN_RUN_TOKEN may hold a secret reference; it must reach the X-Urirun-Token header
+    # resolved (deny-by-default via the secrets layer), never the raw reference string.
+    import urllib.request
+
+    monkeypatch.setenv("NODE_RUN_SECRET", "tok-resolved-123")
+    monkeypatch.setenv("URIRUN_RUN_TOKEN", "getv://NODE_RUN_SECRET")
+    captured: dict = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": true}'
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=None: captured.update(headers=dict(req.header_items())) or _Resp())
+
+    core._post_uri_run("http://node", "fs://host/file/query/blob", {}, 5)
+    assert captured["headers"].get("X-urirun-token") == "tok-resolved-123"
+
+
 def test_document_text_from_uri_fetches_blob_and_ocr(monkeypatch) -> None:
     def fake_post(node_url, uri, payload, timeout):
         assert node_url == "http://node"
