@@ -675,6 +675,49 @@ def ocr_probe(source_paths: str = "") -> dict[str, Any]:
     )
 
 
+def _load_ocr_input(
+    path: str, bytes_b64: str, filename: str, max_input_bytes: int,
+) -> "tuple[Path, dict, tempfile.TemporaryDirectory | None] | str":
+    if bytes_b64:
+        try:
+            raw = _decode_bytes_b64(bytes_b64, max_input_bytes)
+        except ValueError as exc:
+            return str(exc)
+        tmp = tempfile.TemporaryDirectory(prefix="urirun-ocr-input-")
+        target = Path(tmp.name) / f"input{_suffix_for_filename(filename)}"
+        target.write_bytes(raw)
+        return target, {"filename": filename or target.name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}, tmp
+    if not path:
+        return "path or bytes_b64 is required"
+    target = _path(path)
+    if not target.is_file():
+        return f"file not found: {target}"
+    return target, {"filename": filename or target.name, "bytes": target.stat().st_size}, None
+
+
+def _run_ocr_backend(
+    selected: str, ocr_target: "Path", lang: str, max_chars: int,
+    source_paths: str, output_dir: str, timeout: int,
+) -> "dict[str, Any] | None":
+    if selected == "auto":
+        return _document_auto(ocr_target, lang, max_chars, source_paths, output_dir, timeout)
+    if selected == "pdftotext":
+        return _pdftotext(ocr_target, max_chars, timeout)
+    if selected == "pymupdf":
+        return _pymupdf_text(ocr_target, max_chars)
+    if selected == "tesseract":
+        return _tesseract_image(ocr_target, lang, max_chars, timeout)
+    if selected in {"paddle", "paddleocr"}:
+        return _paddle_image(ocr_target, lang, max_chars)
+    if selected == "imgl":
+        return _imgl_image_text(ocr_target, lang, max_chars, max_boxes=250, source_paths=source_paths)
+    if selected == "img2nl":
+        return _img2nl_image_text(ocr_target, max_chars, source_paths)
+    if selected in {"wronai", "wronai-ocr", "pdf-ocr"}:
+        return _wronai_pdf_ocr(ocr_target, max_chars, output_dir, source_paths, lang, timeout)
+    return None
+
+
 @conn.handler("document/query/text", isolated=True, meta={"label": "Extract text from a document", "cliAlias": "text"})
 def document_text(
     path: str = "",
@@ -692,57 +735,24 @@ def document_text(
     timeout: int = 90,
 ) -> dict[str, Any]:
     """Extract text from a local PDF, image, or UTF-8-ish text file."""
-    temp_dir: tempfile.TemporaryDirectory[str] | None = None
-    if bytes_b64:
-        try:
-            raw = _decode_bytes_b64(bytes_b64, max_input_bytes)
-        except ValueError as exc:
-            return urirun.fail(str(exc), connector=CONNECTOR_ID)
-        temp_dir = tempfile.TemporaryDirectory(prefix="urirun-ocr-input-")
-        target = Path(temp_dir.name) / f"input{_suffix_for_filename(filename)}"
-        target.write_bytes(raw)
-        original = {"filename": filename or target.name, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
-    else:
-        if not path:
-            return urirun.fail("path or bytes_b64 is required", connector=CONNECTOR_ID)
-        target = _path(path)
-        if not target.is_file():
-            return urirun.fail(f"file not found: {target}", connector=CONNECTOR_ID, path=str(target))
-        original = {"filename": filename or target.name, "bytes": target.stat().st_size}
+    load = _load_ocr_input(path, bytes_b64, filename, max_input_bytes)
+    if isinstance(load, str):
+        return urirun.fail(load, connector=CONNECTOR_ID, path=str(_path(path)) if path else None)
+    target, original, temp_dir = load
 
     smart_crop_meta: dict[str, Any] | None = None
     ocr_target = target
-    if smart_crop and target.suffix.lower() in IMAGE_EXTS:
-        ocr_target, smart_crop_meta = _smart_crop_target(target, crop_output_dir or output_dir)
-        if crop_fail_if_uncertain and not smart_crop_meta.get("ok"):
-            if temp_dir is not None:
-                temp_dir.cleanup()
-            return urirun.fail(
-                str(smart_crop_meta.get("reason", "smart crop failed")),
-                connector=CONNECTOR_ID,
-                input=original,
-                smartCrop=smart_crop_meta,
-            )
-
     try:
+        if smart_crop and target.suffix.lower() in IMAGE_EXTS:
+            ocr_target, smart_crop_meta = _smart_crop_target(target, crop_output_dir or output_dir)
+            if crop_fail_if_uncertain and not smart_crop_meta.get("ok"):
+                return urirun.fail(
+                    str(smart_crop_meta.get("reason", "smart crop failed")),
+                    connector=CONNECTOR_ID, input=original, smartCrop=smart_crop_meta,
+                )
         selected = backend.strip().lower() or "auto"
-        if selected == "auto":
-            result = _document_auto(ocr_target, lang, max_chars, source_paths, output_dir, timeout)
-        elif selected == "pdftotext":
-            result = _pdftotext(ocr_target, max_chars, timeout)
-        elif selected == "pymupdf":
-            result = _pymupdf_text(ocr_target, max_chars)
-        elif selected == "tesseract":
-            result = _tesseract_image(ocr_target, lang, max_chars, timeout)
-        elif selected in {"paddle", "paddleocr"}:
-            result = _paddle_image(ocr_target, lang, max_chars)
-        elif selected == "imgl":
-            result = _imgl_image_text(ocr_target, lang, max_chars, max_boxes=250, source_paths=source_paths)
-        elif selected == "img2nl":
-            result = _img2nl_image_text(ocr_target, max_chars, source_paths)
-        elif selected in {"wronai", "wronai-ocr", "pdf-ocr"}:
-            result = _wronai_pdf_ocr(ocr_target, max_chars, output_dir, source_paths, lang, timeout)
-        else:
+        result = _run_ocr_backend(selected, ocr_target, lang, max_chars, source_paths, output_dir, timeout)
+        if result is None:
             return urirun.fail(f"unsupported OCR backend: {backend}", connector=CONNECTOR_ID, path=str(target))
     finally:
         if temp_dir is not None:
