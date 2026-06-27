@@ -1,6 +1,17 @@
 # urirun-connector-ocr
 
-OCR routes for urirun nodes.
+OCR routes for urirun nodes. Schemat URI: `ocr://`
+
+## Instalacja
+
+```bash
+pip install urirun-connector-ocr
+# dev:  pip install -e . && PYTHONPATH=. pytest -q
+```
+
+Optional OCR backends (`paddleocr`, `pytesseract` + the Tesseract binary) are used
+when present; without them the connector falls back to whatever local tool is
+available on the node.
 
 The connector uses lightweight local tools first and optional repository
 backends when they are available on the node:
