@@ -339,3 +339,20 @@ def test_manifest_prose_plus_derived_routes() -> None:
     assert set(manifest["routes"]) == ALL_ROUTES
     assert "imgl" in manifest["keywords"]
     json.dumps(manifest)
+
+
+def test_contract_output_shape() -> None:
+    """backend/query/probe live output must satisfy the declared out-schema."""
+    import importlib.util, sys
+    sys.path.insert(0, "/home/tom/github/if-uri/urirun-contract")
+    from urirun_connectors_toolkit.contract_gate import validate_output
+    spec = importlib.util.spec_from_file_location(
+        "contracts_ocr",
+        "/home/tom/github/if-uri/urirun-connector-ocr/urirun_connector_ocr/contracts.py",
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    result = ocr_probe()
+    assert result["ok"] is True
+    validate_output(mod.CONTRACTS["backend/query/probe"], result)
