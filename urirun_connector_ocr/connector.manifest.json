@@ -25,10 +25,10 @@
   ],
   "install": {
     "pip": "urirun-connector-ocr",
-    "local": "pip install -e /home/tom/github/if-uri/urirun-connector-ocr"
+    "local": "pip install -e ~/github/if-uri/urirun-connector-ocr"
   },
   "env": {
-    "URI_OCR_SOURCE_PATHS": "Optional path list for local source checkouts. Defaults include /home/tom/github/semcod/imgl, /home/tom/github/wronai/img2nl/src, /home/tom/github/wronai/ocr, /home/tom/github/oqlos/vql/src.",
+    "URI_OCR_SOURCE_PATHS": "Optional path list for local source checkouts. Defaults include ~/github/semcod/imgl, ~/github/wronai/img2nl/src, ~/github/wronai/ocr, ~/github/oqlos/vql/src.",
     "URI_OCR_LATEST_IMAGE": "Default image path used by ocr://host/image/latest/query/text.",
     "URI_OCR_ENABLE_AI": "Set to 1 to allow auto mode to call the heavier wronai/ocr Ollama backend."
   },

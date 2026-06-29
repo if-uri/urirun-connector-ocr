@@ -47,13 +47,14 @@ TEXT_EXTS = {".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm"}
 
 def _default_source_paths() -> list[Path]:
     """Known local source checkouts that provide OCR/layout functionality."""
+    gh = Path.home() / "github"
     return [
-        Path("/home/tom/github/semcod/imgl"),
-        Path("/home/tom/github/semcod/imgl/imgl"),
-        Path("/home/tom/github/wronai/imgl"),
-        Path("/home/tom/github/wronai/img2nl/src"),
-        Path("/home/tom/github/wronai/ocr"),
-        Path("/home/tom/github/oqlos/vql/src"),
+        gh / "semcod/imgl",
+        gh / "semcod/imgl/imgl",
+        gh / "wronai/imgl",
+        gh / "wronai/img2nl/src",
+        gh / "wronai/ocr",
+        gh / "oqlos/vql/src",
     ]
 
 
